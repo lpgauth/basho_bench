@@ -24,8 +24,7 @@
 -module(basho_bench_driver_riakc_dt_pb).
 
 -export([new/1,
-         run/4,
-         set_name/0]).
+         run/4]).
 
 -include("basho_bench.hrl").
 
@@ -34,10 +33,14 @@
                  last_key,
                  batch_size,
                  preload,
-                 preloaded_sXgets,
+                 preloaded_sets,
+                 preloaded_sets_num,
                  last_preload_nth,
-                 max_preload_size
+                 max_vals_for_preload,
+                 run_one_set
                }).
+
+-define(DEFAULT_SET_KEY, <<"bench_set">>).
 
 new(Id) ->
     %% Make sure the path is setup such that we can get at riak_client
@@ -51,11 +54,14 @@ new(Id) ->
 
     Ips  = basho_bench_config:get(riakc_dt_pb_ips, [{127,0,0,1}]),
     Port  = basho_bench_config:get(riakc_dt_pb_port, 8087),
-    Bucket  = basho_bench_config:get(riakc_dt_pb_bucket, {<<"riak_dt">>, <<"test">>}),
+    Bucket  = basho_bench_config:get(riakc_dt_pb_bucket, {<<"riak_dt">>,
+                                                          <<"test">>}),
     BatchSize = basho_bench_config:get(riakc_dt_pb_sets_batchsize, 1000),
     Preload = basho_bench_config:get(riakc_dt_preload_sets, false),
     PreloadNum = basho_bench_config:get(riakc_dt_preload_sets_num, 10),
-    MaxPreloadSize = basho_bench_config:get(riakc_dt_preload_sets_max, 100),
+    MaxValsForPreloadSet = basho_bench_config:get(
+                             riakc_dt_max_vals_for_preload, 100),
+    RunOneSet = basho_bench_config:get(riakc_dt_run_one_set, false),
 
     %% Choose the target node using our ID as a modulus
     Targets = basho_bench_config:normalize_ips(Ips, Port),
@@ -70,14 +76,32 @@ new(Id) ->
                                 false ->
                                     []
                             end,
+            if RunOneSet ->
+                    Set0 = riakc_set:new(),
+                    %% can't be unmodified
+                    Set1 = riakc_set:add_element(<<"69">>, Set0),
+                    Result = riakc_pb_socket:update_type(
+                               Pid, Bucket, ?DEFAULT_SET_KEY, riakc_set:to_op(Set1)
+                              ),
+                    case Result of
+                        ok ->
+                            ?INFO("~p created", [?DEFAULT_SET_KEY]);
+                        {error, Reason} ->
+                            ?ERROR("~p not created b/c ~p", [?DEFAULT_SET_KEY,
+                                                             Reason])
+                    end;
+               true -> ok
+            end,
             {ok, #state{ pid = Pid,
                          bucket = Bucket,
                          last_key=undefined,
                          batch_size = BatchSize,
                          preload = Preload,
                          preloaded_sets = PreloadedSets,
-                         last_preload_nth = 1,
-                         max_preload_size = MaxPreloadSize
+                         preloaded_sets_num = PreloadNum,
+                         last_preload_nth = 0,
+                         max_vals_for_preload = MaxValsForPreloadSet,
+                         run_one_set = RunOneSet
                        }};
         {error, Reason} ->
             ?FAIL_MSG("Failed to connect riakc_pb_socket to ~p:~p: ~p\n",
@@ -85,56 +109,82 @@ new(Id) ->
     end.
 
 run({set, insert}, _KeyGen, ValueGen, #state{pid=Pid, bucket=Bucket,
-                                             preload=true,
-                                             preloaded_sets=PreloadedSets,
-                                             last_preload_nth=Nth,
-                                             max_preload_size=MaxPreloadSize}=State) ->
-    Val = ValueGen(),
-    SetKey = lists:nth(Nth + 1, PreloadedSets),
+                                             run_one_set=true}=State) ->
+    FetchResult = riakc_pb_socket:fetch_type(Pid, Bucket, ?DEFAULT_SET_KEY),
+    case FetchResult of
+        {ok, Set0} ->
+            Val = ValueGen(),
+            Set1 = riakc_set:add_element(Val, Set0),
+            Result = riakc_pb_socket:update_type(Pid, Bucket, ?DEFAULT_SET_KEY,
+                                                 riakc_set:to_op(Set1)),
+            case Result of
+                ok ->
+                    {ok, State};
+                {error, Reason} ->
+                    {error, Reason, State}
+            end;
+        {error, {notfound, _}} ->
+            {ok, State};
+        {error, FetchReason} ->
+            {error, FetchReason, State}
+    end;
+run({set, insert}, _KeyGen, ValueGen,
+    #state{pid=Pid, bucket=Bucket, preload=true, preloaded_sets=PreloadedSets,
+           preloaded_sets_num=PreloadedSetsNum, last_preload_nth=LastNth,
+           max_vals_for_preload=MaxValsForPreloadSet}=State) ->
+    NextNth = case LastNth >= PreloadedSetsNum of
+                  true -> 1;
+                  false -> LastNth + 1
+              end,
+    SetKey = lists:nth(NextNth, PreloadedSets),
     FetchResult = riakc_pb_socket:fetch_type(Pid, Bucket, SetKey),
     case FetchResult of
         {ok, Set0} ->
+            Val = ValueGen(),
             SetSize = riakc_set:size(Set0),
-            if SetSize < MaxPreloadSize ->
+            if SetSize < MaxValsForPreloadSet ->
                     Set1 = riakc_set:add_element(Val, Set0),
                     Result = riakc_pb_socket:update_type(Pid, Bucket, SetKey,
                                                          riakc_set:to_op(Set1)),
                     case Result of
                         ok ->
-                            {ok, State};
+                            {ok, State#state{last_preload_nth=NextNth}};
                         {error, Reason} ->
                             {error, Reason, State}
-                    end
+                    end;
+               true -> {ok, State#state{last_preload_nth=NextNth}}
             end;
         {error, {notfound, _}} ->
             {ok, State};
-        {error, Reason} ->
-            {error, Reason, State}
+        {error, FetchReason} ->
+            {error, FetchReason, State}
     end;
-
 run({set, insert}, KeyGen, ValueGen, #state{pid=Pid, bucket=Bucket}=State) ->
     SetKey = KeyGen(),
     Val = ValueGen(),
     Set0 = riakc_set:new(),
     Set1 = riakc_set:add_element(Val, Set0),
     Result = riakc_pb_socket:update_type(Pid, Bucket, SetKey, riakc_set:to_op(Set1)),
-
     case Result of
         ok ->
             {ok, State};
         {error, Reason} ->
             {error, Reason, State}
     end;
+
 run({set, batch_insert}, KeyGen, ValueGen, #state{pid=Pid, bucket=Bucket,
                                                   last_key=LastKey,
                                                   batch_size=BatchSize}=State) ->
     {SetKey, Members} = gen_set_batch(KeyGen, ValueGen, LastKey, BatchSize),
     Set0 = riakc_set:new(),
-    Set1 = lists:foreach(fun(Elem) -> riakc_set:add_element(Elem, Set0) end, Members),
-    Result = riakc_pb_socket:update_type(Pid, Bucket, SetKey, riakc_set:to_op(Set1)),
+    SetLast = lists:foldl(fun(Elem, Sets) ->
+                              Sets ++ [riakc_set:add_element(Elem, Set0)]
+                         end, [], Members),
+    Result = riakc_pb_socket:update_type(Pid, Bucket, SetKey,
+                                         riakc_set:to_op(lists:last(SetLast))),
     case Result of
         ok ->
-            {ok, State};
+            {ok, State#state{last_key=SetKey}};
         {error, Reason} ->
             {error, Reason, State}
     end;
@@ -175,8 +225,6 @@ run({set, is_element}, KeyGen, ValueGen, #state{pid=Pid, bucket=Bucket}=State) -
         {error, Reason} ->
             {error, Reason, State}
     end.
-
-set_name() -> <<"bench_set">>.
 
 %%%===================================================================
 %%% Private
@@ -227,6 +275,10 @@ preload_sets(N, Pid, Bucket) ->
     SetKeys = [begin X1 = integer_to_binary(X),
                   Y = <<"set">>,
                   <<X1/binary,Y/binary>> end || X <- lists:seq(1, N)],
-    [ok = riakc_pb_socket:update_type(Pid, Bucket, SetKey,
-                                      riakc_set:to_op(riakc_set:new()))
-     || SetKey <- SetKeys].
+    [begin
+         Set0 = riakc_set:new(),
+         Set1 = riakc_set:add_element(<<"69">>, Set0),
+         ok = riakc_pb_socket:update_type(Pid, Bucket, SetKey,
+                                          riakc_set:to_op(Set1)),
+         SetKey
+     end || SetKey <- SetKeys].
