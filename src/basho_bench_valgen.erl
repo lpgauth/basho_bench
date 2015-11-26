@@ -38,6 +38,12 @@ new({fixed_bin, Size, Val}, _Id)
   when is_integer(Size), Size >= 0, is_integer(Val), Val >= 0, Val =< 255 ->
     Data = list_to_binary(lists:duplicate(Size, Val)),
     fun() -> Data end;
+%% Create a set of binaries with elements of Size and a cardinality of Card
+new({fixed_bin_set, Size, Card}, Id) when is_integer(Size), Size >= 0 ->
+    %% This might be a bit hacky
+    basho_bench_config:set(?VAL_GEN_SRC_SIZE, Size*Card),
+    Source = init_source(Id),
+    fun() -> data_block(fun aligned_offset/2, Source, Size) end;
 new({fixed_char, Size}, _Id)
   when is_integer(Size), Size >= 0 ->
     fun() -> list_to_binary(lists:map(fun (_) -> random:uniform(95)+31 end, lists:seq(1,Size))) end;
@@ -105,10 +111,13 @@ init_source(Id, Path) ->
     end,
     {?VAL_GEN_BLOB_CFG, size(Bin), Bin}.
 
-data_block({SourceCfg, SourceSz, Source}, BlockSize) ->
+data_block(Source, BlockSize) ->
+    data_block(fun random_offset/2, Source, BlockSize).
+
+data_block(OffsetFun, {SourceCfg, SourceSz, Source}, BlockSize) ->
     case SourceSz - BlockSize > 0 of
         true ->
-            Offset = random:uniform(SourceSz - BlockSize),
+            Offset = OffsetFun(SourceSz, BlockSize),
             <<_:Offset/bytes, Slice:BlockSize/bytes, _Rest/binary>> = Source,
             Slice;
         false ->
@@ -116,3 +125,9 @@ data_block({SourceCfg, SourceSz, Source}, BlockSize) ->
                   [SourceCfg, SourceSz, BlockSize]),
             Source
     end.
+
+random_offset(SourceSz, BlockSize) ->
+    random:uniform(SourceSz - BlockSize).
+
+aligned_offset(SourceSz, BlockSize) ->
+    (random:uniform(SourceSz - BlockSize) div BlockSize) * BlockSize.
