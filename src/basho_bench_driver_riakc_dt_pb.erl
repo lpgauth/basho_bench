@@ -35,6 +35,7 @@
                  preload,
                  preloaded_sets,
                  preloaded_sets_num,
+                 var_bin_size,
                  last_preload_nth,
                  max_vals_for_preload,
                  run_one_set
@@ -43,7 +44,6 @@
 -define(DEFAULT_SET_KEY, <<"bench_set">>).
 
 new(Id) ->
-    %% Make sure the path is setup such that we can get at riak_client
     case code:which(riakc_pb_socket) of
         non_existing ->
             ?FAIL_MSG("~s requires riakc_pb_socket module to be available on code path.\n",
@@ -56,13 +56,19 @@ new(Id) ->
     Port  = basho_bench_config:get(riakc_dt_pb_port, 8087),
     Bucket  = basho_bench_config:get(riakc_dt_pb_bucket, {<<"riak_dt">>,
                                                           <<"test">>}),
-    BatchSize = basho_bench_config:get(riakc_dt_pb_sets_batchsize, 1000),
+    BatchSize = basho_bench_config:get(riakc_dt_pb_sets_batchsize, 100),
     Preload = basho_bench_config:get(riakc_dt_preload_sets, false),
     PreloadNum = basho_bench_config:get(riakc_dt_preload_sets_num, 10),
     MaxValsForPreloadSet = basho_bench_config:get(
                              riakc_dt_max_vals_for_preload, 100),
     RunOneSet = basho_bench_config:get(riakc_dt_run_one_set, false),
 
+    FixedBinSize = basho_bench_config:get(riakc_dt_fixed_bin_size, 4),
+    VarBinSize = basho_bench_config:get(riakc_dt_var_bin_size, undefined),
+    StartBinSize = case VarBinSize of
+                       undefined -> FixedBinSize;
+                       {Min, Max} -> crypto:rand_uniform(Min, Max+1)
+                   end,
     %% Choose the target node using our ID as a modulus
     Targets = basho_bench_config:normalize_ips(Ips, Port),
     lager:info("Ips: ~p Targets: ~p\n", [Ips, Targets]),
@@ -72,14 +78,17 @@ new(Id) ->
         {ok, Pid} ->
             PreloadedSets = case Preload of
                                 true ->
-                                    preload_sets(PreloadNum, Pid, Bucket);
+                                    preload_sets(PreloadNum, Pid, Bucket,
+                                                 StartBinSize);
                                 false ->
                                     []
                             end,
             if RunOneSet ->
                     Set0 = riakc_set:new(),
+
                     %% can't be unmodified
-                    Set1 = riakc_set:add_element(<<"69">>, Set0),
+                    Set1 = riakc_set:add_element(crypto:rand_bytes(StartBinSize),
+                                                 Set0),
                     Result = riakc_pb_socket:update_type(
                                Pid, Bucket, ?DEFAULT_SET_KEY, riakc_set:to_op(Set1)
                               ),
@@ -188,6 +197,31 @@ run({set, batch_insert}, KeyGen, ValueGen, #state{pid=Pid, bucket=Bucket,
         {error, Reason} ->
             {error, Reason, State}
     end;
+
+run({set, read}, _KeyGen, _ValueGen, #state{pid=Pid, bucket=Bucket,
+                                            run_one_set=true}=State) ->
+    FetchResult = riakc_pb_socket:fetch_type(Pid, Bucket, ?DEFAULT_SET_KEY),
+    case FetchResult of
+        {ok, _} ->
+            {ok, State};
+        {error, {notfound, _}} ->
+            {ok, State};
+        {error, Reason} ->
+            {error, Reason, State}
+    end;
+run({set, read}, _KeyGen, _ValueGen,
+    #state{pid=Pid, bucket=Bucket, preload=true, preloaded_sets=PreloadedSets,
+           preloaded_sets_num=PreloadedSetsNum}=State) ->
+    SetKey = lists:nth(random:uniform(1, PreloadedSetsNum), PreloadedSets),
+    FetchResult = riakc_pb_socket:fetch_type(Pid, Bucket, SetKey),
+    case FetchResult of
+        {ok, _} ->
+            {ok, State};
+        {error, {notfound, _}} ->
+            {ok, State};
+        {error, Reason} ->
+            {error, Reason, State}
+    end;
 run({set, read}, KeyGen, _ValueGen, #state{pid=Pid, bucket=Bucket}=State) ->
     SetKey = KeyGen(),
     Result = riakc_pb_socket:fetch_type(Pid, Bucket, SetKey),
@@ -199,6 +233,7 @@ run({set, read}, KeyGen, _ValueGen, #state{pid=Pid, bucket=Bucket}=State) ->
         {error, Reason} ->
             {error, Reason, State}
     end;
+
 run({set, remove}, KeyGen, ValueGen, #state{pid=Pid, bucket=Bucket}=State) ->
     SetKey = KeyGen(),
     Val = ValueGen(),
@@ -271,13 +306,13 @@ accumulate_members(BS, Gen, Acc) ->
 
 %% @private preload and update riak with an N-number of set keys,
 %% named in range <<"1..Nset">>.
-preload_sets(N, Pid, Bucket) ->
+preload_sets(N, Pid, Bucket, BinSize) ->
     SetKeys = [begin X1 = integer_to_binary(X),
                   Y = <<"set">>,
                   <<X1/binary,Y/binary>> end || X <- lists:seq(1, N)],
     [begin
          Set0 = riakc_set:new(),
-         Set1 = riakc_set:add_element(<<"69">>, Set0),
+         Set1 = riakc_set:add_element(crypto:rand_bytes(BinSize), Set0),
          ok = riakc_pb_socket:update_type(Pid, Bucket, SetKey,
                                           riakc_set:to_op(Set1)),
          SetKey

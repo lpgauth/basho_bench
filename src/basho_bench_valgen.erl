@@ -40,10 +40,15 @@ new({fixed_bin, Size, Val}, _Id)
     fun() -> Data end;
 %% Create a set of binaries with elements of Size and a cardinality of Card
 new({fixed_bin_set, Size, Card}, Id) when is_integer(Size), Size >= 0 ->
-    %% This might be a bit hacky
     basho_bench_config:set(?VAL_GEN_SRC_SIZE, Size*Card),
     Source = init_source(Id),
     fun() -> data_block(fun aligned_offset/2, Source, Size) end;
+new({var_bin_set, MinSize, MaxSize, Card}, Id) when
+      is_integer(MinSize), is_integer(MaxSize), MinSize >= 0, MinSize =< MaxSize ->
+    basho_bench_config:set(?VAL_GEN_SRC_SIZE, MaxSize*Card),
+    Source = init_source(Id),
+    VarBins = split_bin_blocks(MinSize, MaxSize, Source),
+    fun() -> lists:nth(random:uniform(Card), VarBins) end;
 new({fixed_char, Size}, _Id)
   when is_integer(Size), Size >= 0 ->
     fun() -> list_to_binary(lists:map(fun (_) -> random:uniform(95)+31 end, lists:seq(1,Size))) end;
@@ -69,7 +74,7 @@ new({uniform_int, MaxVal}, _Id)
     fun() -> random:uniform(MaxVal) end;
 new({uniform_int, MinVal, MaxVal}, _Id)
   when is_integer(MinVal), is_integer(MaxVal), MaxVal > MinVal ->
-    fun() -> random:uniform(MinVal, MaxVal) end;
+    fun() -> crypto:rand_uniform(MinVal, MaxVal+1) end;
 new({keygen, KeyGen}, Id) ->
     %% Use a KeyGen as a Value generator
     basho_bench_keygen:new(KeyGen, Id);
@@ -113,7 +118,6 @@ init_source(Id, Path) ->
 
 data_block(Source, BlockSize) ->
     data_block(fun random_offset/2, Source, BlockSize).
-
 data_block(OffsetFun, {SourceCfg, SourceSz, Source}, BlockSize) ->
     case SourceSz - BlockSize > 0 of
         true ->
@@ -131,3 +135,17 @@ random_offset(SourceSz, BlockSize) ->
 
 aligned_offset(SourceSz, BlockSize) ->
     (random:uniform(SourceSz - BlockSize) div BlockSize) * BlockSize.
+
+split_bin_blocks(MinSize, MaxSize, {_SourceCfg, _SourceSz, Source}) ->
+    split_bin_blocks(MinSize, MaxSize, Source, []).
+split_bin_blocks(MinSize, MaxSize, Source, Acc) ->
+    Size = crypto:rand_uniform(MinSize, MaxSize + 1),
+    Padding = MaxSize - Size,
+    case Source of
+        <<>> ->
+            Acc;
+        <<Chunk:Size/bytes, _:Padding/bytes, Rest/binary>> ->
+            split_bin_blocks(MinSize, MaxSize, Rest, [Chunk|Acc]);
+        Bin ->
+            [Bin|Acc]
+    end.
