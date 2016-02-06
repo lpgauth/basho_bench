@@ -165,8 +165,7 @@ terminate(_Reason, #state{stats_writer=Module}=State) ->
     process_stats(os:timestamp(), State),
     report_total_errors(State),
 
-    Module:terminate({State#state.stats_writer,
-                                        State#state.stats_writer_data}).
+    Module:terminate(State#state.stats_writer_data).
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -248,8 +247,7 @@ process_stats(Now, #state{stats_writer=Module}=State) ->
     [folsom_metrics_counter:dec({units, Op}, OpAmount) || {Op, OpAmount} <- OkOpsRes],
 
     %% Write summary
-    Module:process_summary({State#state.stats_writer,
-                                              State#state.stats_writer_data},
+    Module:process_summary(State#state.stats_writer_data,
                                              Elapsed, Window, Oks, Errors),
 
     %% Dump current error counts to console
@@ -274,8 +272,7 @@ report_latency(#state{stats_writer=Module}=State, Elapsed, Window, Op) ->
     Errors = error_counter(Op),
     Units = folsom_metrics:get_metric_value({units, Op}),
 
-    Module:report_latency({State#state.stats_writer,
-                                             State#state.stats_writer_data},
+    Module:report_latency(State#state.stats_writer_data,
                                             Elapsed, Window, Op,
                                             Stats, Errors, Units),
     {Units, Errors}.
@@ -293,8 +290,7 @@ report_total_errors(#state{stats_writer=Module}=State) ->
                                 ok; % per op total
                             false ->
                                 ?INFO("  ~p: ~p\n", [Key, Count]),
-                                Module:report_error({State#state.stats_writer,
-                                                                       State#state.stats_writer_data},
+                                Module:report_error(State#state.stats_writer_data,
                                                                       Key, Count)
                         end
                 end,
