@@ -45,7 +45,7 @@ new({exponential_bin, MinSize, Mean}, Id)
   when is_integer(MinSize), MinSize >= 0, is_number(Mean), Mean > 0 ->
     Source = init_source(Id),
     fun() -> data_block(Source, MinSize + trunc(basho_bench_stats:exponential(1 / Mean))) end;
-new({uniform_bin, MinSize, MaxSize}, Id) 
+new({uniform_bin, MinSize, MaxSize}, Id)
   when is_integer(MinSize), is_integer(MaxSize), MinSize < MaxSize ->
     Source = init_source(Id),
     Diff = MaxSize - MinSize,

@@ -48,16 +48,16 @@ get(Pid, Bucket, Key, R) ->
 put(Pid, Bucket, Key, Value, W, DW) ->
     Pid ! {self(), {put, [{bucket, Bucket}, {key, Key}, {value, Value}, {w, W}, {dw, DW}]}},
 
-    receive 
+    receive
         {Pid, Res} ->
             ok
     end,
     Res.
-            
+
 create_update(Pid, Bucket, Key, Value, R, W, DW) ->
     Pid ! {self(), {create_update, [{bucket, Bucket}, {key, Key}, {value, Value},
                                     {r, R}, {w, W}, {dw, DW}]}},
-    
+
     receive
         {Pid, Res} ->
             ok
@@ -67,7 +67,7 @@ create_update(Pid, Bucket, Key, Value, R, W, DW) ->
 update(Pid, Bucket, Key, Value, R, W, DW) ->
     Pid ! {self(), {update, [{bucket, Bucket}, {key, Key}, {value, Value},
                                     {r, R}, {w, W}, {dw, DW}]}},
-    
+
     receive
         {Pid, Res} ->
             ok
